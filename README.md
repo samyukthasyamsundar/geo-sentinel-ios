@@ -19,8 +19,10 @@ This matters, so it is stated up front.
 |------|--------|
 | `GeoSentinelKit` (all detection logic, CSV parser, live recorder) | **Built and tested.** 99 checks pass on macOS with Swift 6.3 and only the command-line tools. |
 | Same verdicts as the Go tool | **Verified** on 13 files: the six example traces plus single glitches, a two-fix excursion, a 130-fix zig-zag and repeated outliers. |
+| The Xcode project file | **Generated and validated as a well-formed file** (valid plist, all three source files referenced, local package linked, iOS 16 target, location permission string present). Never opened in Xcode. |
 | The SwiftUI app in `App/` | **Written, syntax-checked and type-checked against the macOS SDK. Never compiled for iOS and never run on a phone or simulator.** |
-| iOS-only calls: `requestWhenInUseAuthorization`, `.authorizedWhenInUse`, `activityType`, `pausesLocationUpdatesAutomatically`, `sourceInformation.isSimulatedBySoftware` | **Unchecked.** They do not exist in the macOS SDK, so they were written from documentation. These are the first places to look if the first build fails. |
+| iOS-only calls: `requestWhenInUseAuthorization`, `.authorizedWhenInUse`, `activityType`, `pausesLocationUpdatesAutomatically` | **Checked against Apple's CoreLocation header** in the macOS SDK: they exist, are marked iOS-only (which is why they cannot compile on a Mac), and the names and types match. Still never compiled for iOS. |
+| `CLLocation.sourceInformation` / `isSimulatedBySoftware` (the "iOS says this was produced by software" hint) | **Could not be checked**: it is in no header available here and was written from memory. It is isolated in one function (`producedBySoftware`); if it fails to compile, make that function `return false` and everything else works. |
 
 The machine this was written on had no Xcode and no iOS SDK, so an iPhone build was not possible
 there. **Expect to fix a small compile error or two on first build.**
@@ -28,28 +30,38 @@ there. **Expect to fix a small compile error or two on first build.**
 ## Run the logic checks (any Mac with Swift)
 
 ```sh
-swift run KitChecks                 # 99 checks; exits non-zero if any fail
-swift run KitDemo TestData/fake_teleport.csv
+GEOSENTINEL_TOOLS=1 swift run KitChecks                 # 99 checks; exits non-zero if any fail
+GEOSENTINEL_TOOLS=1 swift run KitDemo TestData/fake_teleport.csv
 ```
+
+(The tools are hidden behind that variable so that Xcode, which resolves this package for the app,
+sees the library alone.)
 
 (`swift test` is not used because XCTest and swift-testing need a full Xcode install; `KitChecks`
 is a small self-contained runner that works without one.)
 
 ## Build the app (needs Xcode 15+ and an iPhone or simulator)
 
-1. Install **Xcode** from the Mac App Store and open it once.
-2. **File > New > Project > iOS > App**, name it `GeoSentinel`, interface **SwiftUI**.
-3. Delete the generated `ContentView.swift` and `...App.swift`, and drag in the three files from
-   `App/GeoSentinelApp/`.
-4. **File > Add Package Dependencies > Add Local...** and choose this folder. Add the
-   `GeoSentinelKit` library to the app target.
-5. In the target's **Info** tab add the key `Privacy - Location When In Use Usage Description` with a
-   sentence such as the one in `App/Info.plist.snippet.md`. Without it iOS shows no permission prompt
-   and the app records nothing.
-6. Choose your phone (or a simulator) and run. On a real phone, set a development team under
-   **Signing & Capabilities**. A free Apple ID works but the app expires after 7 days.
+The Xcode project is generated from `project.yml` and is checked in, so you do not need to click
+through Xcode's project wizard.
 
-In the **simulator**, use *Features > Location* to feed movement, and iOS will mark those locations as
+1. Install **Xcode** from the Mac App Store (a large download, about 35 GB) and open it once so it
+   finishes installing its components.
+2. Open `GeoSentinel.xcodeproj`. (To regenerate it after editing `project.yml`: `brew install xcodegen`
+   then `xcodegen generate`.)
+3. Select the **GeoSentinel** target, then **Signing & Capabilities**, tick *Automatically manage
+   signing* and pick your **Team** (a free Apple ID works; the app expires after 7 days). Change the
+   bundle identifier from `com.example.GeoSentinel` to something unique, such as
+   `com.yourname.GeoSentinel`.
+4. Pick your iPhone (or a simulator) at the top and press **Run**. On a real phone, the first time you
+   may need to trust the developer under *Settings > General > VPN & Device Management*.
+5. When asked, allow location access. (The permission text is already set in the project.)
+
+**If the build fails**, the likeliest cause is `producedBySoftware` in `LocationSource.swift`, the one
+call that could not be checked against Apple's headers. Replace its body with `return false` and build
+again; you lose only the extra "iOS says this was produced by software" hint.
+
+In the **simulator**, use *Features > Location* to feed movement. iOS marks those locations as
 simulated, which the app reports. That is the app working, not a bug.
 
 ## What it cannot do
@@ -72,6 +84,7 @@ simulated, which the app reports. That is the app working, not a bug.
 | `Sources/KitDemo` | prints a verdict for a CSV file |
 | `TestData` | the example traces, shared with the Go tool |
 | `App/GeoSentinelApp` | the SwiftUI app (untested on iOS) |
+| `project.yml`, `GeoSentinel.xcodeproj` | the Xcode project (generated by XcodeGen; checked as a valid file, never opened in Xcode) |
 
 ## License
 

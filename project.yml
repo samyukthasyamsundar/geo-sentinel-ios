@@ -1,0 +1,32 @@
+name: GeoSentinel
+options:
+  bundleIdPrefix: com.example      # change to your own reverse-domain name before running on a phone
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+packages:
+  GeoSentinelKit:
+    path: .
+targets:
+  GeoSentinel:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/GeoSentinelApp
+    dependencies:
+      - package: GeoSentinelKit
+        product: GeoSentinelKit
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: GeoSentinel
+        UILaunchScreen: {}
+        NSLocationWhenInUseUsageDescription: "GeoSentinel reads your phone's GPS to check whether the recorded location looks genuine. Nothing leaves your phone."
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.GeoSentinel
+        CODE_SIGN_STYLE: Automatic
+        # Set DEVELOPMENT_TEAM to your Apple team ID, or pick the team in Xcode under Signing & Capabilities.
+        TARGETED_DEVICE_FAMILY: "1"

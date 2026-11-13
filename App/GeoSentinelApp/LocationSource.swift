@@ -59,13 +59,26 @@ final class LocationSource: NSObject, ObservableObject, CLLocationManagerDelegat
                 // horizontalAccuracy < 0 means "invalid"; LiveRecorder rejects those too.
                 self.recorder.add(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude,
                                   accuracyM: loc.horizontalAccuracy, time: loc.timestamp)
-                // iOS 15+ marks locations produced by software (developer tools, mock-location apps).
-                // Reporting it is exactly this app's purpose, and it needs no workaround or evasion.
-                if let src = loc.sourceInformation, src.isSimulatedBySoftware { self.isSimulatedBySoftware = true }
+                if Self.producedBySoftware(loc) { self.isSimulatedBySoftware = true }
             }
             self.fixCount = self.recorder.fixes.count
             self.rejectedCount = self.recorder.rejected
         }
+    }
+
+    /// True if iOS reports that this location was produced by software (developer tools, a mock-location
+    /// app) rather than the GPS hardware. Reporting this is exactly the app's purpose.
+    ///
+    /// **This is the one call in the app that could NOT be checked against Apple's headers** (it is not
+    /// in the SDK available when this was written; `CLLocation.sourceInformation` and
+    /// `CLLocationSourceInformation.isSimulatedBySoftware` are from memory of the iOS 15 API).
+    /// If it fails to compile, replace the body with `return false`: everything else keeps working and
+    /// the detector still analyses the trace; you only lose this extra iOS-reported hint.
+    private nonisolated static func producedBySoftware(_ loc: CLLocation) -> Bool {
+        if #available(iOS 15.0, *) {
+            return loc.sourceInformation?.isSimulatedBySoftware ?? false
+        }
+        return false
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
