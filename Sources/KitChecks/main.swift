@@ -93,20 +93,32 @@ do {
 }
 
 // ---------------- one GPS glitch in an honest trace must not make it "suspicious" ----------------
-// Regression: a single bad fix was explained by the speed check as a lone outlier, but the acceleration check
-// still fired on its return leg, so a phone user with one ordinary glitch was told their drive looked suspicious.
+// A single bad fix that corrects itself is what a receiver glitch looks like. It must never change the verdict
+// by itself (whatever its size up to the ceiling), and must never be reported as an acceleration.
 do {
     let base = load("honest_drive")
-    for (offset, meters) in [(60.0, 150), (300.0, 150), (300.0, 800)] as [(Double, Double)] {
+    for meters in [150.0, 300.0, 800.0, 5000.0] {
         var fixes = base.fixes
-        let i = Int(offset) / 2
-        fixes[i].point = Geo.destination(fixes[i].point, bearing: 90, meters: meters)
+        fixes[150].point = Geo.destination(fixes[150].point, bearing: 90, meters: meters)
         let fs = Detector.analyze(Trace(fixes: fixes))
-        let v = Detector.judge(fs)
-        check(v == .clean || (meters >= 300 && v != .likelySpoofed),
-              "a single \(Int(meters)) m glitch: verdict \(v.rawValue) with findings \(fs.map { $0.check })")
-        check(!fs.contains { $0.check == "acceleration" }, "glitch of \(Int(meters)) m should not also be reported as an acceleration")
+        check(Detector.judge(fs) == .clean, "a single \(Int(meters)) m glitch: verdict \(Detector.judge(fs).rawValue), findings \(fs.map { $0.check })")
+        check(!fs.contains { $0.check == "acceleration" }, "glitch of \(Int(meters)) m must not also be an acceleration")
     }
+}
+
+// ---------------- the outlier handling must not hide real anomalies ----------------
+do {
+    let base = load("honest_drive")
+    func verdict(_ mutate: (inout [Fix]) -> Void) -> Verdict { var f = base.fixes; mutate(&f); return Detector.judge(Detector.analyze(Trace(fixes: f))) }
+    // a zig-zag: every second fix displaced 600 m. Each looks like an isolated outlier alone; together they are tampering.
+    let zig = verdict { f in for i in stride(from: 20, to: 280, by: 2) { f[i].point = Geo.destination(f[i].point, bearing: 90, meters: 600) } }
+    check(zig != .clean, "a zig-zag of 130 displaced fixes was judged clean")
+    // a two-fix excursion is not an isolated outlier
+    let two = verdict { f in for i in [150, 151] { f[i].point = Geo.destination(f[i].point, bearing: 90, meters: 5000) } }
+    check(two != .clean, "a two-fix 5 km excursion was judged clean")
+    // many repeated lone outliers escalate
+    let many = verdict { f in for i in stride(from: 20, to: 280, by: 10) { f[i].point = Geo.destination(f[i].point, bearing: 90, meters: 400_000) } }
+    check(many == .likelySpoofed, "26 repeated lone outliers: \(many.rawValue)")
 }
 
 // ---------------- LiveRecorder ----------------

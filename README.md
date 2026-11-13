@@ -17,8 +17,8 @@ This matters, so it is stated up front.
 
 | Part | Status |
 |------|--------|
-| `GeoSentinelKit` (all detection logic, CSV parser, live recorder) | **Built and tested.** 94 checks pass on macOS with Swift 6.3 and only the command-line tools. |
-| Same verdicts as the Go tool on the same six example traces | **Verified** (honest = clean, teleport = likely-spoofed, frozen and scripted = suspicious, careful fake = clean). |
+| `GeoSentinelKit` (all detection logic, CSV parser, live recorder) | **Built and tested.** 99 checks pass on macOS with Swift 6.3 and only the command-line tools. |
+| Same verdicts as the Go tool | **Verified** on 13 files: the six example traces plus single glitches, a two-fix excursion, a 130-fix zig-zag and repeated outliers. |
 | The SwiftUI app in `App/` | **Written, syntax-checked and type-checked against the macOS SDK. Never compiled for iOS and never run on a phone or simulator.** |
 | iOS-only calls: `requestWhenInUseAuthorization`, `.authorizedWhenInUse`, `activityType`, `pausesLocationUpdatesAutomatically`, `sourceInformation.isSimulatedBySoftware` | **Unchecked.** They do not exist in the macOS SDK, so they were written from documentation. These are the first places to look if the first build fails. |
 
@@ -28,7 +28,7 @@ there. **Expect to fix a small compile error or two on first build.**
 ## Run the logic checks (any Mac with Swift)
 
 ```sh
-swift run KitChecks                 # 94 checks; exits non-zero if any fail
+swift run KitChecks                 # 99 checks; exits non-zero if any fail
 swift run KitDemo TestData/fake_teleport.csv
 ```
 

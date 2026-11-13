@@ -88,6 +88,32 @@ public enum Detector {
     }
     private static func distText(_ m: Double) -> String { m >= 10_000 ? String(format: "%.0f km", m / 1000) : String(format: "%.0f m", m) }
 
+    // MARK: isolated outliers
+
+    /// Marks fixes that are wrong on their own: far from where BOTH neighbours say the device was, while those
+    /// neighbours agree with each other. One bad receiver reading looks like this; a relocation does not, because
+    /// the fixes after it stay at the new place and so disagree with the ones before.
+    static func isolatedOutliers(_ f: [Fix], _ cfg: Config) -> [Bool] {
+        var out = [Bool](repeating: false, count: f.count)
+        if f.count < 3 { return out }
+        for i in 1..<(f.count - 1) {
+            let a = f[i - 1], b = f[i], c = f[i + 1]
+            if b.time.timeIntervalSince(a.time) < cfg.minGapForSpeed || c.time.timeIntervalSince(b.time) < cfg.minGapForSpeed { continue }
+            if !returnsNear(f, i - 1, i + 1, cfg) { continue }
+            let span = c.time.timeIntervalSince(a.time)
+            let frac = b.time.timeIntervalSince(a.time) / span
+            let expected = GeoPoint(lat: a.point.lat + (c.point.lat - a.point.lat) * frac,
+                                    lon: a.point.lon + (c.point.lon - a.point.lon) * frac)
+            let off = Geo.distance(b.point, expected)
+            out[i] = off > max(50, noise(a) + noise(b) + noise(c))
+        }
+        return out
+    }
+
+    /// Excusing outliers is only safe when there are few of them: 1% of the fixes, and at least 2.
+    /// A trace where a sizeable share look like "isolated outliers" has been tampered with, not glitched.
+    static func maxExcusedOutliers(_ n: Int) -> Int { max(2, n / 100) }
+
     // MARK: checks
 
     static func ordering(_ t: Trace) -> [Finding] {
@@ -172,14 +198,21 @@ public enum Detector {
         struct Seg { let v: Double; let slack: Double; let mid: Date; let fixIndex: Int }
         let f = t.fixes
         var segs: [Seg] = []
-        if f.count >= 2 {
-            for i in 1..<f.count {
-                let dt = f[i].time.timeIntervalSince(f[i - 1].time)
+        // One bad fix corrupts the speed into it and out of it, and both then look like an acceleration, so
+        // build the speeds from the fixes that are NOT isolated outliers (the speed check reports those).
+        // Past a small count they stop being excused: that is tampering, not glitching.
+        var bad = isolatedOutliers(f, cfg)
+        if bad.filter({ $0 }).count > maxExcusedOutliers(f.count) { bad = [Bool](repeating: false, count: f.count) }
+        let keep = f.indices.filter { !bad[$0] }
+        if keep.count >= 2 {
+            for k in 1..<keep.count {
+                let i = keep[k], p = keep[k - 1]
+                let dt = f[i].time.timeIntervalSince(f[p].time)
                 if dt < cfg.minGapForSpeed || dt > cfg.maxGap { continue }
-                var n = noise(f[i - 1]) + noise(f[i])
-                if f[i - 1].accuracyM == nil || f[i].accuracyM == nil { n = 20 }
-                segs.append(Seg(v: Geo.distance(f[i - 1].point, f[i].point) / dt, slack: n / dt,
-                                mid: f[i - 1].time.addingTimeInterval(dt / 2), fixIndex: i))
+                var n = noise(f[p]) + noise(f[i])
+                if f[p].accuracyM == nil || f[i].accuracyM == nil { n = 20 }
+                segs.append(Seg(v: Geo.distance(f[p].point, f[i].point) / dt, slack: n / dt,
+                                mid: f[p].time.addingTimeInterval(dt / 2), fixIndex: i))
             }
         }
         var out: [Finding] = []
