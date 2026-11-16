@@ -22,12 +22,19 @@ from this repository, and compare its SHA-256 first. If you would rather not run
 yourself:
 
 ```sh
-cd MacApp && Packaging/build_app.sh 1.0.0      # needs the Swift toolchain; writes MacApp/dist/
+cd MacApp && Packaging/build_app.sh 1.1.0      # needs the Swift toolchain; writes MacApp/dist/
 ```
 
 **Use it:** drag a file onto the window (or *Open file...*), and pick the travel mode that matches the trip
 (on foot, car, train, aircraft). The mode matters: an aircraft trace analysed with the car limit will look
 faked. Your file is read on this Mac and never uploaded; the app has no networking code.
+
+**What you see:** a verdict card (with the reasons), trip stats (duration, positions, distance, top speed,
+average), and the path on a plain lat/lon grid coloured by speed (darker is faster). Press play to replay
+the trip: the marker only moves along positions that are in the file. Distance and speed are shown **only
+when they can be trusted**: when the file's GPS error is larger than the movement (a slow walk, say), the
+app says it cannot measure them, draws a plain path, and shows no speed colours rather than inventing
+figures. Impossible jumps are left out of the stats and drawn as dashed lines.
 
 **What has and has not been checked:**
 
