@@ -4,3 +4,9 @@
 xcuserdata/
 DerivedData/
 .DS_Store
+
+# Mac app build output: the .zip is attached to a release, never committed
+MacApp/dist/
+MacApp/.build/
+MacApp/.build-arm64/
+MacApp/.build-x86_64/

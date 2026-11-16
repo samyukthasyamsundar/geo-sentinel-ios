@@ -1,4 +1,48 @@
-# GeoSentinel for iPhone
+# GeoSentinel
+
+Two apps that check GPS data for signs of being **faked**, built on one shared Swift detector:
+
+- **GeoSentinel for Mac**: drop a GPS file (`.csv` or `.gpx`) on it and see a verdict, the reasons, and the
+  track on a map with the suspicious positions marked. **Downloadable** (see below).
+- **GeoSentinel for iPhone**: records your phone's real GPS and checks it. Source only; **not yet built
+  or run on a phone** (see the status table further down).
+
+## GeoSentinel for Mac
+
+**Download:** the latest `GeoSentinel-<version>-macOS.zip` from the
+[Releases page](https://github.com/samyukthasyamsundar/geo-sentinel-ios/releases). It is one universal
+app for Apple Silicon and Intel Macs, macOS 13 or later. Check the download against the `.sha256` file
+shown on the release.
+
+**macOS will warn you the first time, and that is expected.** The app is signed ad-hoc and is **not
+notarised**, because notarising needs a paid Apple Developer account. Gatekeeper reports it as rejected.
+To open it: unzip, then **right-click `GeoSentinel.app`, choose Open, and confirm**. (On newer macOS you may
+instead need *System Settings > Privacy & Security > Open Anyway*.) Only do this for a copy you downloaded
+from this repository, and compare its SHA-256 first. If you would rather not run an unsigned binary, build it
+yourself:
+
+```sh
+cd MacApp && Packaging/build_app.sh 1.0.0      # needs the Swift toolchain; writes MacApp/dist/
+```
+
+**Use it:** drag a file onto the window (or *Open file...*), and pick the travel mode that matches the trip
+(on foot, car, train, aircraft). The mode matters: an aircraft trace analysed with the car limit will look
+faked. Your file is read on this Mac and never uploaded; the app has no networking code.
+
+**What has and has not been checked:**
+
+| Part | Status |
+|------|--------|
+| The detector, both parsers, the map geometry, the file loader | **Tested**: 120 + 132 checks pass; each parser defence and the map edge cases (date line, poles, one point, whole-world traces) were broken on purpose to confirm a test fails |
+| Every screen (welcome, result, errors) | **Rendered to images and inspected**, which found and fixed real bugs (a map running to the pole, data jammed against the map edge, a legend describing a hidden shape, eight identical findings flooding the list) |
+| The packaged app | **Builds, is code-signed (ad-hoc), contains both architectures, and launches and stays running** on an Apple Silicon Mac |
+| Drag-and-drop, the file picker, the travel-mode menu, clicking a finding | **Not exercised by anyone.** They compile and are wired up, but nobody has clicked them, because the checks here draw views to images and cannot drive a real window |
+| The Intel half of the universal binary | **Built, never run** (the test machine is Apple Silicon) |
+
+A clean verdict cannot rule out a careful fake: replaying realistic-looking movement somewhere else leaves
+nothing impossible in the data.
+
+## GeoSentinel for iPhone
 
 An iPhone app that records your phone's **real GPS** (with your permission) and checks it for signs
 of being faked: impossible speed, teleports, impossible acceleration, and machine-regular movement.

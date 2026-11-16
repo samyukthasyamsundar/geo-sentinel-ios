@@ -153,5 +153,66 @@ do {
     check(honest.assess()?.verdict == .clean, "live-fed honest drive is judged clean")
 }
 
+// ---------------- GPX parser ----------------
+func gpx(_ s: String) throws -> Trace { try GPXParser.parse(Data(s.utf8)) }
+func gpxError(_ s: String) -> ParseError? { do { _ = try gpx(s); return nil } catch { return error as? ParseError } }
+
+let goodGPX = """
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="t" xmlns="http://www.topografix.com/GPX/1/1">
+ <wpt lat="1" lon="1"><time>2026-11-12T09:00:00Z</time></wpt>
+ <trk><trkseg>
+  <trkpt lat="47.6000" lon="-122.3000"><ele>10</ele><time>2026-11-12T10:00:00Z</time><hdop>1.2</hdop></trkpt>
+  <trkpt lat="47.6001" lon="-122.3001"><time>2026-11-12T10:00:10Z</time><accuracy>3.5</accuracy></trkpt>
+ </trkseg></trk>
+</gpx>
+"""
+if let t = try? gpx(goodGPX) {
+    check(t.fixes.count == 2, "GPX: waypoints ignored, 2 trackpoints (got \(t.fixes.count))")
+    check(t.fixes[0].accuracyM == 6, "GPX: hdop 1.2 -> 6 m (got \(String(describing: t.fixes[0].accuracyM)))")
+    check(t.fixes[1].accuracyM == 3.5, "GPX: explicit accuracy")
+} else { check(false, "good GPX should parse") }
+
+let badGPX: [(String, String, String)] = [
+    ("not xml", "hello", "invalid XML"),
+    ("wrong root", "<kml><trkpt lat=\"1\" lon=\"1\"/></kml>", "not a GPX file"),
+    ("no trackpoints", "<gpx><wpt lat=\"1\" lon=\"1\"/></gpx>", "no <trkpt>"),
+    ("missing lon", "<gpx><trkpt lat=\"1\"><time>2026-11-12T10:00:00Z</time></trkpt></gpx>", "needs lat and lon"),
+    ("bad lat", "<gpx><trkpt lat=\"abc\" lon=\"1\"><time>2026-11-12T10:00:00Z</time></trkpt></gpx>", "bad lat"),
+    ("bad time", "<gpx><trkpt lat=\"1\" lon=\"1\"><time>never</time></trkpt></gpx>", "bad time"),
+    ("no time", "<gpx><trkpt lat=\"1\" lon=\"1\"></trkpt></gpx>", "no <time>"),
+    ("truncated", "<gpx><trk><trkseg><trkpt lat=\"1\" lon=\"1\"><time>2026-11-12T10:00:00Z</time>", "invalid XML"),
+    ("NaN lat", "<gpx><trkpt lat=\"NaN\" lon=\"1\"><time>2026-11-12T10:00:00Z</time></trkpt></gpx>", "not finite"),
+]
+for (name, input, want) in badGPX {
+    if let e = gpxError(input) { check(e.message.contains(want), "GPX \(name): got '\(e.message)', want '\(want)'") }
+    else { check(false, "GPX \(name) should be rejected") }
+}
+
+// hostile documents
+let bomb = """
+<?xml version="1.0"?>
+<!DOCTYPE gpx [ <!ENTITY a "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">
+ <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;"> <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;"> <!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;"> ]>
+<gpx><trk><trkseg><trkpt lat="1" lon="1"><time>&d;</time></trkpt></trkseg></trk></gpx>
+"""
+let started = Date()
+check(gpxError(bomb)?.message.contains("DOCTYPE") == true, "entity bomb is refused up front")
+check(Date().timeIntervalSince(started) < 2, "entity bomb is rejected quickly, not expanded")
+let xxe = "<?xml version=\"1.0\"?><!DOCTYPE gpx [ <!ENTITY x SYSTEM \"file:///etc/passwd\"> ]><gpx><trkpt lat=\"1\" lon=\"1\"><time>&x;</time></trkpt></gpx>"
+let xxeErr = gpxError(xxe)
+check(xxeErr != nil && !xxeErr!.message.contains("root:"), "external entity refused and nothing leaked: \(String(describing: xxeErr))")
+check(gpxError("<!DocType gpx []><gpx><trkpt lat=\"1\" lon=\"1\"/></gpx>")?.message.contains("DOCTYPE") == true, "mixed-case DOCTYPE is still caught")
+
+// depth and text limits use input that is otherwise valid, so the limit is the ONLY thing that can reject it
+let deep = "<gpx>" + String(repeating: "<x>", count: 100) + "<trkpt lat=\"1\" lon=\"1\"><time>2026-11-12T10:00:00Z</time></trkpt>" + String(repeating: "</x>", count: 100) + "</gpx>"
+check(gpxError(deep)?.message.contains("nested too deeply") == true, "100-deep nesting refused: \(String(describing: gpxError(deep)))")
+let shallow = "<gpx>" + String(repeating: "<x>", count: 10) + "<trkpt lat=\"1\" lon=\"1\"><time>2026-11-12T10:00:00Z</time></trkpt>" + String(repeating: "</x>", count: 10) + "</gpx>"
+check(gpxError(shallow) == nil, "10-deep nesting is fine")
+let padded = "<gpx><trkpt lat=\"1\" lon=\"1\"><time>2026-11-12T10:00:00Z" + String(repeating: " ", count: 1000) + "</time></trkpt></gpx>"
+check(gpxError(padded)?.message.contains("unreasonably long") == true, "1000-byte element text refused: \(String(describing: gpxError(padded)))")
+check(gpxError("<gpx><trkpt lat=\"1\" lon=\"1\"><time>2026-11-12T10:00:00Z   </time></trkpt></gpx>") == nil, "short padded text is fine")
+check((try? GPXParser.parse(Data([0xff, 0xfe, 0x00, 0x80]))) == nil, "binary garbage is rejected, not crashed on")
+
 print(failures == 0 ? "all \(total) checks passed" : "\(failures) of \(total) check(s) FAILED")
 exit(failures == 0 ? 0 : 1)
