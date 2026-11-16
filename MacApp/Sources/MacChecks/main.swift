@@ -196,5 +196,247 @@ check(summary(for: a(.clean, findings: 3)).contains("3 notes"), "plural notes wo
 check(summary(for: a(.suspicious, findings: 2)).contains("none is conclusive"), "suspicious summary does not accuse")
 check(summary(for: a(.likelySpoofed, findings: 2)).contains("no real device"), "spoofed summary")
 
+// ---------------- TripStats ----------------
+func runTrace(_ n: Int, metersPerSecond v: Double, accuracy: Double? = nil, startLat: Double = 10) -> Trace {
+    Trace(fixes: (0..<n).map { i in
+        Fix(point: GeoPoint(lat: startLat + Double(i) * v / 111_194.93, lon: 20), time: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)), accuracyM: accuracy, line: i + 2)
+    })
+}
+do {
+    // 101 fixes, 1 s apart, steady 10 m/s => 100 steps, 1000 m, 100 s, speed exactly 10 m/s
+    let s = Stats.compute(runTrace(101, metersPerSecond: 10))
+    near(s.distanceM, 1000, 1.0, "steady run: distance")
+    near(s.duration, 100, 1e-9, "steady run: duration")
+    near(s.averageSpeedMS, 10, 0.01, "steady run: average speed")
+    near(s.topSpeedMS, 10, 0.01, "steady run: top speed")
+    check(s.fixCount == 101 && s.jumpCount == 0, "steady run: no jumps (\(s.jumpCount))")
+    check(s.stepSpeeds.count == 101 && s.stepSpeeds[0] == 0, "one speed per fix, the first being 0")
+    check(!s.isEmpty, "a 101-fix trace is not empty")
+}
+do { // a teleport must NOT turn into a 8000 km "distance" or a mach-20 top speed
+    var fixes = runTrace(60, metersPerSecond: 10).fixes
+    for i in 30..<60 { fixes[i].point = GeoPoint(lat: fixes[i].point.lat + 70, lon: 120) }   // jump thousands of km and stay
+    let s = Stats.compute(Trace(fixes: fixes))
+    check(s.jumpCount == 1, "one jump step is excluded (\(s.jumpCount))")
+    check(s.distanceM < 1000, "the jump adds no distance: \(s.distanceM) m")
+    check(s.topSpeedMS < 20, "the jump does not own the top speed: \(s.topSpeedMS) m/s")
+    check(s.stepSpeeds.contains { $0.isNaN }, "the jump step is marked (NaN) for the map")
+}
+do { // one GPS glitch must not own the headline top speed (that is why it is the 99th percentile)
+    var fixes = runTrace(201, metersPerSecond: 10).fixes
+    fixes[100].point = Geo.destination(fixes[100].point, bearing: 90, meters: 800)    // one 800 m glitch: ~800 m/s each way => jumps
+    let s = Stats.compute(Trace(fixes: fixes))
+    check(s.topSpeedMS < 30, "one glitch does not set the top speed: \(s.topSpeedMS) m/s")
+    // The glitch is dropped as an isolated OUTLIER before any window is formed (the same definition the verdict
+    // uses), so it never becomes a "jump" and cannot anchor a window and read as 80 m/s.
+    check(s.jumpCount == 0, "a lone glitch is an outlier, not a jump (\(s.jumpCount) jumps)")
+    let trusted = Detector.trustedIndices(fixes)
+    check(trusted.count == 200 && !trusted.contains(100), "exactly the glitch fix (100) is the one left out: \(201 - trusted.count) dropped")
+    check(s.stepSpeeds[100].isNaN, "and it carries no speed, so the map draws no coloured path through it")
+    near(s.distanceM, 2000, 60, "distance is the real travel (200 steps at 10 m/s), not inflated by the glitch: \(s.distanceM)")
+}
+do { // S1: the headline top speed is a high percentile, so one brief fast stretch cannot own it.
+    // 200 steps at 10 m/s, with a one-step 290 m displacement at fix 101 that then CONTINUES from the new place
+    // (a small relocation, not a lone glitch, so it is not dropped as an outlier). Speeds are measured over
+    // 10-second windows, which dilutes a one-second event of 300 m/s to about 33 m/s: measuring GPS over adjacent
+    // fixes just reads noise (that gave a 47% overlong path on a real-looking drive), so a blip is smoothed, by design.
+    var fixes = runTrace(201, metersPerSecond: 10).fixes
+    for i in 101..<201 { fixes[i].point = GeoPoint(lat: fixes[i].point.lat + 290.0 / 111_194.93, lon: fixes[i].point.lon) }
+    let s = Stats.compute(Trace(fixes: fixes))
+    check(s.jumpCount == 0, "the 10-second window containing the step is 30 m/s, far under the jump threshold (\(s.jumpCount) jumps)")
+    check(s.stepSpeeds.contains { $0 > 25 && $0 < 45 }, "the event shows up, smoothed over its window, as about 30 m/s: max \(s.stepSpeeds.filter { $0.isFinite }.max() ?? -1)")
+    check(!s.stepSpeeds.contains { $0.isFinite && $0 > 100 }, "no single second is reported as hundreds of m/s")
+    check(s.topSpeedMS < 40, "one brief event does not drive the top speed to the raw 300 m/s: \(s.topSpeedMS) m/s")
+    // ...but a SUSTAINED fast stretch (5% of the trip) does show up, since it is real
+    var sustained = runTrace(201, metersPerSecond: 10).fixes
+    var extra = 0.0
+    for i in 1..<201 { if i >= 100 && i < 120 { extra += 40 }; sustained[i].point = GeoPoint(lat: sustained[i].point.lat + extra / 111_194.93, lon: 20) }
+    let s2 = Stats.compute(Trace(fixes: sustained))
+    check(s2.topSpeedMS > 40, "a sustained fast stretch is reflected in the top speed: \(s2.topSpeedMS) m/s")
+}
+do { // S6: average speed is distance over MOVING time, so a long pause does not drag it down
+    // 50 steps at 10 m/s, then a 1000 s gap with the device standing still, then 50 more steps at 10 m/s.
+    var fixes: [Fix] = []
+    var lat = 10.0, t = 0.0
+    for i in 0..<101 {
+        if i == 51 { t += 1000 }                       // a long pause: same position, much later
+        fixes.append(Fix(point: GeoPoint(lat: lat, lon: 20), time: Date(timeIntervalSince1970: 1_700_000_000 + t), accuracyM: nil, line: i + 2))
+        if i != 50 { lat += 10.0 / 111_194.93 }
+        t += 1
+    }
+    let s = Stats.compute(Trace(fixes: fixes))
+    check(s.duration > 1000, "the trip really lasted over 1000 s: \(s.duration)")
+    near(s.averageSpeedMS, 10, 1.0, "average speed ignores the long standstill (moving time, not wall time): \(s.averageSpeedMS) m/s")
+}
+do { // REGRESSION: found by looking at a screenshot. On a real-looking noisy drive the first version of the stats
+    // reported "Average 61 km/h, Top speed 33 km/h" (an average above the top, impossible) and a 611 m distance,
+    // because per-step speed over 1 Hz GPS with ~13 m of error is mostly noise. Checked against the same trace
+    // measured independently in Python: the straight line start-to-end is 2,521 m and the 10-second-window path 2,647 m.
+    if let url = Optional(URL(fileURLWithPath: "../TestData/honest_drive.csv")), let data = try? Data(contentsOf: url),
+       let trace = try? CSVParser.parse(data) {
+        let s = Stats.compute(trace)
+        check(s.averageSpeedMS <= s.topSpeedMS + 1e-9, "the average (\(Stats.speedText(s.averageSpeedMS))) never exceeds the top speed (\(Stats.speedText(s.topSpeedMS)))")
+        check(s.distanceM > 2521 && s.distanceM < 3000, "distance is between the straight line (2521 m) and a sane path length: \(s.distanceM) m")
+        near(s.duration, 299, 1, "the drive lasted 299 seconds")
+        check(s.averageSpeedMS * 3.6 > 20 && s.averageSpeedMS * 3.6 < 45, "average speed is a believable drive: \(Stats.speedText(s.averageSpeedMS))")
+        check(s.topSpeedMS * 3.6 < 70, "top speed is believable: \(Stats.speedText(s.topSpeedMS))")
+        check(s.jumpCount == 0, "an honest drive has no jumps (\(s.jumpCount))")
+    } else { check(false, "could not load ../TestData/honest_drive.csv (run from the MacApp folder)") }
+    // ...and for every example trace the average never exceeds the top speed
+    for name in ["honest_drive", "honest_walk", "fake_frozen", "fake_scripted", "fake_careful", "fake_teleport"] {
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: "../TestData/\(name).csv")), let t = try? CSVParser.parse(data) {
+            let s = Stats.compute(t)
+            check(s.averageSpeedMS <= s.topSpeedMS + 1e-9 && s.distanceM.isFinite && s.topSpeedMS.isFinite, "\(name): average \(Stats.speedText(s.averageSpeedMS)) <= top \(Stats.speedText(s.topSpeedMS))")
+            // which traces are measurable is a property of the data: a walker with 13 m of GPS error cannot be measured
+            // over 10-second windows (about 14 m of travel against 27 m of forgiven error), so it must say so
+            let expectReliable = name != "honest_walk"
+            check(s.reliable == expectReliable, "\(name): reliable == \(s.reliable), expected \(expectReliable)")
+        } else { check(false, "could not load \(name)") }
+    }
+}
+do { // reliability: say "cannot measure" instead of showing precise-looking wrong numbers
+    // a standstill is a clear answer, not an unmeasurable one
+    let still = Trace(fixes: (0..<120).map { i in Fix(point: GeoPoint(lat: 10, lon: 20), time: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)), accuracyM: 5, line: i + 2) })
+    let st = Stats.compute(still)
+    check(st.reliable && st.topSpeedMS == 0 && st.distanceM == 0, "a standstill is reliably zero: reliable=\(st.reliable) top=\(st.topSpeedMS) dist=\(st.distanceM)")
+    // a steady drive with modest noise is measurable
+    check(Stats.compute(runTrace(200, metersPerSecond: 12, accuracy: 8)).reliable, "a steady 12 m/s drive with 8 m error is measurable")
+    // a slow walker with large reported error is not: 1.4 m/s over 10 s is 14 m, less than the 2 x 20 m forgiven
+    let walker = Trace(fixes: (0..<300).map { i in
+        Fix(point: GeoPoint(lat: 10 + Double(i) * 1.4 / 111_194.93, lon: 20), time: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)), accuracyM: 20, line: i + 2) })
+    let ws = Stats.compute(walker)
+    check(!ws.reliable, "a 1.4 m/s walk with 20 m error cannot be measured over 10 s windows (reliable=\(ws.reliable))")
+    check(ws.distanceM == 0 && ws.topSpeedMS == 0, "and it reports no invented figures: dist \(ws.distanceM), top \(ws.topSpeedMS)")
+    // a walk that went NOWHERE (back and forth within the error) is a standstill, and that is a clear answer
+    let pacing = Trace(fixes: (0..<300).map { i in
+        Fix(point: GeoPoint(lat: 10 + (i % 20 < 10 ? 1 : -1) * Double(i % 10) * 1.4 / 111_194.93, lon: 20), time: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)), accuracyM: 20, line: i + 2) })
+    let ps = Stats.compute(pacing)
+    check(ps.reliable && ps.topSpeedMS == 0, "pacing within the GPS error is a reliable standstill: reliable=\(ps.reliable) top=\(ps.topSpeedMS)")
+    // ...but the same walk with a good fix (4 m error) can
+    let careful = Trace(fixes: (0..<300).map { i in
+        Fix(point: GeoPoint(lat: 10 + Double(i) * 1.4 / 111_194.93, lon: 20), time: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)), accuracyM: 4, line: i + 2) })
+    let cs = Stats.compute(careful)
+    check(cs.reliable, "the same walk with 4 m error is measurable")
+    near(cs.averageSpeedMS, 1.4, 0.25, "and its average is about 1.4 m/s (5 km/h): \(cs.averageSpeedMS)")
+}
+do { // Detector.trustedIndices: one definition of a bad fix, shared by the verdict and the statistics
+    let clean = runTrace(100, metersPerSecond: 10).fixes
+    check(Detector.trustedIndices(clean) == Array(clean.indices), "an honest trace trusts every fix")
+    var one = clean; one[50].point = Geo.destination(one[50].point, bearing: 90, meters: 600)
+    check(Detector.trustedIndices(one) == clean.indices.filter { $0 != 50 }, "a lone bad fix is the only one dropped")
+    var zig = runTrace(300, metersPerSecond: 10).fixes
+    for k in stride(from: 20, to: 280, by: 2) { zig[k].point = Geo.destination(zig[k].point, bearing: 90, meters: 600) }
+    check(Detector.trustedIndices(zig).count == zig.count, "a zig-zag of 130 bad fixes is tampering, not glitches: none are dropped")
+    check(Detector.trustedIndices([]) == [] && Detector.trustedIndices([clean[0]]) == [0], "empty and one-fix inputs are fine")
+}
+do { // reported accuracy is forgiven, as in the detector, so a stationary noisy receiver is not "moving"
+    let still = Trace(fixes: (0..<50).map { i in
+        Fix(point: GeoPoint(lat: 10 + (i % 2 == 0 ? 0.00003 : -0.00003), lon: 20), time: Date(timeIntervalSince1970: 1_700_000_000 + Double(i)), accuracyM: 20, line: i + 2)
+    })
+    check(Stats.compute(still).topSpeedMS == 0, "jitter inside the reported accuracy is not speed: \(Stats.compute(still).topSpeedMS)")
+}
+do { // degenerate inputs never crash and never produce non-finite headline numbers
+    for t in [Trace(fixes: []), Trace(fixes: [fix(1, 1)]), Trace(fixes: [fix(1, 1, 0), fix(1, 1, 0)]), Trace(fixes: [fix(1, 1, 5), fix(2, 2, 5)]),
+              Trace(fixes: Array(repeating: fix(5, 5), count: 30))] {
+        let s = Stats.compute(t)
+        check(s.distanceM.isFinite && s.averageSpeedMS.isFinite && s.topSpeedMS.isFinite && s.duration.isFinite && s.duration >= 0,
+              "finite headline numbers for \(t.fixes.count) fix(es)")
+    }
+    check(Stats.compute(Trace(fixes: [])).isEmpty && Stats.compute(Trace(fixes: [fix(1, 1)])).isEmpty, "0 or 1 fix is flagged as empty")
+    check(Stats.compute(Trace(fixes: [fix(1, 1, 0), fix(1.0001, 1, 1)])).isEmpty == false, "2 fixes is enough")
+}
+do { // out-of-order input is analysed in time order
+    var fixes = runTrace(11, metersPerSecond: 10).fixes
+    fixes.reverse()
+    near(Stats.compute(Trace(fixes: fixes)).distanceM, 100, 0.5, "shuffled input gives the same distance")
+}
+do { // percentile
+    near(Stats.percentile([1, 2, 3, 4, 5], 0.5), 3, 1e-12, "median")
+    near(Stats.percentile([1, 2, 3, 4, 5], 0), 1, 1e-12, "p0 is the minimum")
+    near(Stats.percentile([1, 2, 3, 4, 5], 1), 5, 1e-12, "p100 is the maximum")
+    near(Stats.percentile([10, 20], 0.5), 15, 1e-12, "interpolates between values")
+    check(Stats.percentile([], 0.5) == 0, "no values gives 0")
+    near(Stats.percentile([7], 0.99), 7, 1e-12, "one value")
+    near(Stats.percentile([1, .nan, 3, .infinity], 0.5), 2, 1e-12, "non-finite values are ignored")
+    check(Stats.percentile([1, 2, 3], -5) == 1 && Stats.percentile([1, 2, 3], 5) == 3, "p is clamped to 0...1")
+}
+do { // formatting
+    check(Stats.distanceText(0) == "0 m" && Stats.distanceText(999) == "999 m", "metres")
+    check(Stats.distanceText(1500) == "1.5 km" && Stats.distanceText(99_999) == "100.0 km", "kilometres with a decimal")
+    check(Stats.distanceText(250_000) == "250 km", "large distances drop the decimal")
+    check(Stats.durationText(0) == "0 s" && Stats.durationText(59) == "59 s", "seconds")
+    check(Stats.durationText(60) == "1 min 0 s" && Stats.durationText(125) == "2 min 5 s", "minutes")
+    check(Stats.durationText(3600) == "1 h 0 min" && Stats.durationText(7500) == "2 h 5 min", "hours")
+    check(Stats.speedText(10) == "36 km/h", "10 m/s is 36 km/h: \(Stats.speedText(10))")
+}
+
+// ---------------- SpeedRamp ----------------
+do {
+    let lums = SpeedRamp.steps.map { SpeedRamp.luminance($0) }
+    check(zip(lums, lums.dropFirst()).allSatisfy { $0 > $1 }, "ramp gets strictly darker with speed: \(lums.map { String(format: "%.3f", $0) })")
+    check(lums[0] > 0.65 && lums[0] < 0.85, "the slowest step is visible on white (luminance \(lums[0]))")
+    let hues = SpeedRamp.steps.map { c in c.b > c.r && c.b > c.g * 0.99 }
+    check(hues.allSatisfy { $0 }, "every step is blue-dominant: one hue family")
+    let c0 = SpeedRamp.colour(speed: 0, top: 30), c1 = SpeedRamp.colour(speed: 30, top: 30), cx = SpeedRamp.colour(speed: 900, top: 30)
+    check(c0.r == SpeedRamp.steps[0].r, "zero speed is the slowest colour")
+    check(c1.r == SpeedRamp.steps.last!.r && cx.r == c1.r, "top speed and anything above are the fastest colour")
+    for bad in [Double.nan, -3, .infinity] { check(SpeedRamp.colour(speed: bad, top: 30).r == SpeedRamp.steps[0].r, "bad speed \(bad) falls back to the slowest") }
+    for top in [0.0, -1, .nan, .infinity] { check(SpeedRamp.colour(speed: 5, top: top).r == SpeedRamp.steps[0].r, "bad top \(top) falls back, no crash") }
+    var prev = 2.0, mono = true
+    for k in 0...60 { let l = SpeedRamp.luminance(SpeedRamp.colour(speed: Double(k), top: 60)); if l > prev + 1e-12 { mono = false }; prev = l }
+    check(mono, "interpolated colour never gets lighter as speed rises")
+}
+
+// ---------------- replayStep (the replay clock) ----------------
+do {
+    // a replay always takes between 6 and 40 seconds to watch, whatever the trip length
+    func secondsToWatch(_ tripSeconds: Double) -> Double {
+        var f = 0.0, t = 0.0
+        while f < 1 && t < 1000 { f = replayStep(fraction: f, durationSeconds: tripSeconds, dt: 1.0 / 30.0); t += 1.0 / 30.0 }
+        return t
+    }
+    near(secondsToWatch(2), 6, 0.1, "a 2-second trip is slowed to a watchable 6 s: \(secondsToWatch(2))")
+    near(secondsToWatch(20), 20, 0.1, "a 20-second trip replays in real time: \(secondsToWatch(20))")
+    near(secondsToWatch(36_000), 40, 0.1, "a 10-hour trip is sped up to 40 s: \(secondsToWatch(36_000))")
+    check(replayStep(fraction: 0.5, durationSeconds: 100, dt: 1.0 / 30.0) > 0.5, "it moves forward")
+    check(replayStep(fraction: 0.999, durationSeconds: 20, dt: 5) == 1, "it never goes past the end")
+    check(replayStep(fraction: -2, durationSeconds: 20, dt: 0.1) >= 0, "a negative start is clamped")
+    for bad in [(Double.nan, 20.0, 0.1), (0.5, .nan, 0.1), (0.5, 20, .nan), (0.5, 0, 0.1), (0.5, -5, 0.1), (0.5, 20, 0), (0.5, 20, -1), (.infinity, 20, 0.1)] {
+        let r = replayStep(fraction: bad.0, durationSeconds: bad.1, dt: bad.2)
+        check(r.isFinite && r >= 0 && r <= 1, "bad input \(bad) gives a valid fraction (\(r)), never NaN or out of range")
+    }
+}
+do { // the statistics are computed once and stored, so the views never recompute them on a redraw
+    let a = Analysis(fileName: "t", trace: runTrace(101, metersPerSecond: 10), findings: [], verdict: .clean)
+    near(a.stats.distanceM, 1000, 1.0, "Analysis stores the trip distance")
+    near(a.duration, 100, 1e-9, "Analysis stores the duration")
+    check(a.stats.fixCount == 101, "and the fix count")
+    let b = Analysis(fileName: "t", trace: runTrace(101, metersPerSecond: 10), findings: [], verdict: .clean)
+    check(a == b, "two analyses of the same trace are equal")
+}
+
+// ---------------- replayPosition ----------------
+do {
+    let f = runTrace(11, metersPerSecond: 10).fixes     // t = 0...10 s
+    check(replayPosition(f, fraction: 0)?.index == 0 && replayPosition(f, fraction: 0)?.along == 0, "start of replay is the first fix")
+    let end = replayPosition(f, fraction: 1)
+    check(end?.index == 10 && end?.along == 0, "end of replay is the last fix: \(String(describing: end))")
+    let mid = replayPosition(f, fraction: 0.25)!           // 2.5 s: halfway between fix 2 and 3
+    check(mid.index == 2 && abs(mid.along - 0.5) < 1e-9, "a quarter of the way is halfway between fixes 2 and 3: \(mid)")
+    check(replayPosition(f, fraction: -3)?.index == 0 && replayPosition(f, fraction: 9)?.index == 10, "out-of-range fractions are clamped")
+    check(replayPosition(f, fraction: .nan) != nil, "NaN fraction does not crash")
+    check(replayPosition([], fraction: 0.5) == nil, "no fixes, no position")
+    check(replayPosition([fix(1, 1)], fraction: 0.5)?.index == 0, "a single fix replays at that fix")
+    check(replayPosition([fix(1, 1, 5), fix(2, 2, 5)], fraction: 0.5)?.index == 0, "no elapsed time: stays at the start")
+    // every fraction maps to a valid segment
+    var ok = true
+    for k in 0...200 { if let p = replayPosition(f, fraction: Double(k) / 200) { if p.index < 0 || p.index >= f.count || p.along < 0 || p.along > 1 { ok = false } } else { ok = false } }
+    check(ok, "every fraction 0...1 maps to a valid index and offset")
+    // uneven spacing: the marker follows TIME, so it lingers where the device did
+    let uneven = [fix(0, 0, 0), fix(0, 0.001, 1), fix(0, 0.002, 91)]
+    let p = replayPosition(uneven, fraction: 0.5)!         // 45.5 s is in the long second gap
+    check(p.index == 1 && p.along > 0.4 && p.along < 0.6, "the marker follows elapsed time, not fix count: \(p)")
+}
+
 print(failures == 0 ? "all \(total) checks passed" : "\(failures) of \(total) check(s) FAILED")
 exit(failures == 0 ? 0 : 1)

@@ -10,6 +10,10 @@ struct ContentView: View {
     @State var dropTargeted = false
     @State var lastURL: URL?
     @State var showImporter = false
+    @State var replay: Double?          // nil = replay marker hidden
+    @State var playing = false
+    /// Drives the replay. 30 updates a second is smooth without being wasteful; it only runs while `playing`.
+    private let ticker = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     /// For the headless self-test and previews: start in a given state.
     init(result: Result<Analysis, Loader.Failure>? = nil, speed: SpeedPreset = .car, picked: Int? = nil) {
@@ -20,9 +24,11 @@ struct ContentView: View {
         VStack(spacing: 0) {
             toolbar
             Divider()
-            Screen(result: result, picked: $picked, openFile: { showImporter = true })
+            Screen(result: result, picked: $picked, replay: $replay, isPlaying: playing, togglePlay: togglePlay,
+                   openFile: { showImporter = true })
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .onReceive(ticker) { _ in advanceReplay() }
         .frame(minWidth: 760, minHeight: 520)
         .overlay { if dropTargeted { dropOverlay } }
         .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
@@ -71,7 +77,23 @@ struct ContentView: View {
 
     func open(_ url: URL) {
         lastURL = url; picked = nil
+        playing = false; replay = nil          // a new file starts with no replay: never carry one over
         result = Loader.analyse(url: url, speed: speed)
+    }
+
+    func togglePlay() {
+        guard case .success(let a)? = result, !a.stats.isEmpty else { return }
+        if playing { playing = false; return }
+        // pressing play at (or past) the end starts again from the beginning
+        if (replay ?? 0) >= 1 { replay = 0 } else if replay == nil { replay = 0 }
+        playing = true
+    }
+
+    func advanceReplay() {
+        guard playing, case .success(let a)? = result else { return }
+        let next = replayStep(fraction: replay ?? 0, durationSeconds: a.duration, dt: 1.0 / 30.0)
+        replay = next
+        if next >= 1 { playing = false }       // stop at the end; the marker stays on the last position
     }
 }
 
@@ -92,6 +114,10 @@ struct Screen: View {
     static let scrollThreshold = 8
     let result: Result<Analysis, Loader.Failure>?
     @Binding var picked: Int?
+    /// Replay position as a fraction 0...1, or nil when replay is off.
+    var replay: Binding<Double?> = .constant(nil)
+    var isPlaying: Bool = false
+    var togglePlay: () -> Void = {}
     var openFile: () -> Void = {}
 
     var body: some View {
@@ -128,7 +154,6 @@ struct Screen: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 verdictBanner(a)
-                Text(summary(for: a)).font(.callout)
                 if a.verdict == .clean {
                     Text("A clean result cannot rule out a careful fake: replaying realistic movement somewhere else leaves nothing impossible in the data.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -140,12 +165,17 @@ struct Screen: View {
             .frame(width: 360, alignment: .topLeading)
             .frame(maxHeight: .infinity, alignment: .top)
             Divider()
-            VStack(alignment: .leading, spacing: 6) {
-                Text(a.fileName).font(.headline).lineLimit(1).truncationMode(.middle)
-                TrackMap(analysis: a, highlight: picked)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
-                Text("Plain latitude/longitude grid, no coastlines. Green circle: start. Black square: end. Red diamond: a flagged position. Dashed line: a jump between positions too far apart to be one path.")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(a.fileName).font(.headline).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    if a.stats.reliable && a.stats.topSpeedMS > 0 { SpeedLegend(top: a.stats.topSpeedMS) }
+                }
+                TrackMap(analysis: a, highlight: picked, replay: replay.wrappedValue)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator))
+                replayBar(a)
+                Text("Plain latitude/longitude grid, no coastlines. \(a.stats.reliable ? "Path colour: speed (darker is faster). " : "")Green circle: start. Black square: end. Red diamond: a flagged position. Dashed red line: a jump between positions too far apart to be one path.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(16)
@@ -161,11 +191,63 @@ struct Screen: View {
             case .likelySpoofed: return ("xmark.octagon.fill", "Likely faked", .red)
             }
         }()
-        return HStack(spacing: 10) {
-            Image(systemName: icon).font(.title).foregroundStyle(color)
-            Text(title).font(.title2.bold())
+        let stats = a.stats
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).font(.system(size: 34)).foregroundStyle(color)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.title2.bold())
+                    Text(summary(for: a)).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if !stats.isEmpty {
+                // Duration is always known. Distance and speed are shown only when they can be stood behind: with
+                // GPS error larger than the movement in a 10-second window the figures would look precise and be wrong.
+                HStack(spacing: 8) {
+                    StatTile(label: "Duration", value: Stats.durationText(stats.duration))
+                    StatTile(label: "Positions", value: "\(stats.fixCount)")
+                }
+                if stats.reliable {
+                    HStack(spacing: 8) {
+                        StatTile(label: "Distance", value: Stats.distanceText(stats.distanceM))
+                        StatTile(label: "Top speed", value: Stats.speedText(stats.topSpeedMS))
+                    }
+                    HStack(spacing: 8) {
+                        StatTile(label: "Average", value: Stats.speedText(stats.averageSpeedMS))
+                        StatTile(label: "Flagged", value: a.findings.isEmpty ? "none" : "\(grouped(a.findings).count) kind\(grouped(a.findings).count == 1 ? "" : "s")")
+                    }
+                } else {
+                    Label("Too little movement, compared with this file's GPS error, to measure distance or speed.",
+                          systemImage: "scope")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if stats.jumpCount > 0 {
+                    Text("\(stats.jumpCount) impossible jump\(stats.jumpCount == 1 ? "" : "s") left out of these figures.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.45), lineWidth: 1.5))
         .accessibilityElement(children: .combine)
+    }
+
+    func replayBar(_ a: Analysis) -> some View {
+        let on = replay.wrappedValue != nil
+        return HStack(spacing: 10) {
+            Button(action: togglePlay) {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill").frame(width: 22, height: 22)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel(isPlaying ? "Pause replay" : "Replay the recorded trip")
+            // A plain bar that is also a slider: tapping and dragging scrub through the trip.
+            ReplayScrubber(value: Binding(get: { replay.wrappedValue ?? 0 }, set: { replay.wrappedValue = $0 }))
+                .frame(height: 22)
+            Text(on ? Stats.durationText((replay.wrappedValue ?? 0) * a.duration) : "Replay")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 78, alignment: .trailing)
+        }
     }
 
     @ViewBuilder func findingsList(_ a: Analysis) -> some View {

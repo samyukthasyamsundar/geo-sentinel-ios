@@ -7,9 +7,16 @@ public struct Analysis: Equatable {
     public var trace: Trace
     public var findings: [Finding]
     public var verdict: Verdict
+    /// Computed ONCE when the file is analysed, then only read. The views redraw 30 times a second during a replay,
+    /// so computing statistics (a pass over up to half a million fixes) inside a view would make big files stutter.
+    public let stats: TripStats
+    /// First and last timestamps, for the replay clock.
+    public let duration: TimeInterval
 
     public init(fileName: String, trace: Trace, findings: [Finding], verdict: Verdict) {
         self.fileName = fileName; self.trace = trace; self.findings = findings; self.verdict = verdict
+        self.stats = Stats.compute(trace)
+        self.duration = self.stats.duration
     }
 
     public static func == (a: Analysis, b: Analysis) -> Bool {

@@ -114,6 +114,16 @@ public enum Detector {
     /// A trace where a sizeable share look like "isolated outliers" has been tampered with, not glitched.
     static func maxExcusedOutliers(_ n: Int) -> Int { max(2, n / 100) }
 
+    /// The fixes that are NOT isolated outliers, as indices into `fixes` (which must be in time order). Used by trip
+    /// statistics so a single bad reading cannot anchor a stretch of travel and inflate speed or distance. Public so
+    /// the statistics and the verdict share ONE definition of "a bad fix" and can never disagree about it. If more
+    /// than a small share look like outliers the trace is treated as tampered with, not glitchy, and none are dropped.
+    public static func trustedIndices(_ fixes: [Fix], config: Config = Config()) -> [Int] {
+        var bad = isolatedOutliers(fixes, config)
+        if bad.filter({ $0 }).count > maxExcusedOutliers(fixes.count) { bad = [Bool](repeating: false, count: fixes.count) }
+        return fixes.indices.filter { !bad[$0] }
+    }
+
     // MARK: checks
 
     static func ordering(_ t: Trace) -> [Finding] {

@@ -73,8 +73,15 @@ public struct TrackMap: View {
     let analysis: Analysis
     /// Index (into the SORTED trace) of the finding the user picked, drawn with a marker.
     var highlight: Int?
+    /// Replay position as a fraction 0...1 of elapsed time, or nil for no replay marker. The marker rides the
+    /// RECORDED positions (interpolated between two real fixes) and never shows a place that is not in the file.
+    var replay: Double?
+    /// Colour the path by step speed (darker = faster). Off draws a plain accent line.
+    var colourBySpeed: Bool
 
-    public init(analysis: Analysis, highlight: Int? = nil) { self.analysis = analysis; self.highlight = highlight }
+    public init(analysis: Analysis, highlight: Int? = nil, replay: Double? = nil, colourBySpeed: Bool = true) {
+        self.analysis = analysis; self.highlight = highlight; self.replay = replay; self.colourBySpeed = colourBySpeed
+    }
 
     private var fixes: [Fix] { analysis.trace.sortedByTime().trace.fixes }
 
@@ -102,9 +109,27 @@ public struct TrackMap: View {
 
             // the path, broken where it jumps; the jumps themselves are drawn dashed so the story stays visible
             let segs = trackSegments(pts, breakDistance: Double(min(size.width, size.height)) * 0.5)
-            for seg in segs where seg.count > 1 {
-                ctx.stroke(Path { p in p.move(to: seg[0]); seg.dropFirst().forEach { p.addLine(to: $0) } },
-                           with: .color(.accentColor), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            // Speed colouring shows the same numbers the stat tiles do, so when those cannot be trusted the path is
+            // drawn plain. (On a walk with ~13 m of GPS error the few windows that cleared the noise floor were drawn
+            // dark blue among light ones, suggesting bursts of speed that were never there.)
+            if colourBySpeed && analysis.stats.reliable {
+                // One short stroke per step, coloured by that step's speed on a single-hue ramp (darker = faster).
+                // Steps that are jumps (NaN) are skipped here and drawn dashed below.
+                let stats = analysis.stats
+                let top = max(stats.topSpeedMS, 1)
+                for i in 1..<max(1, pts.count) where i < stats.stepSpeeds.count {
+                    let a = pts[i - 1], b = pts[i]
+                    if hypot(b.x - a.x, b.y - a.y) > Double(min(size.width, size.height)) * 0.5 { continue }
+                    let c = SpeedRamp.colour(speed: stats.stepSpeeds[i], top: top)
+                    ctx.stroke(Path { p in p.move(to: a); p.addLine(to: b) },
+                               with: .color(Color(red: c.r, green: c.g, blue: c.b)),
+                               style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                }
+            } else {
+                for seg in segs where seg.count > 1 {
+                    ctx.stroke(Path { p in p.move(to: seg[0]); seg.dropFirst().forEach { p.addLine(to: $0) } },
+                               with: .color(.accentColor), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                }
             }
             for k in 1..<max(1, segs.count) {
                 if let a = segs[k - 1].last, let b = segs[k].first {
@@ -121,14 +146,36 @@ public struct TrackMap: View {
             }
             // start and end: shape AND label, never colour alone
             ctx.fill(Path(ellipseIn: CGRect(x: pts[0].x - 5, y: pts[0].y - 5, width: 10, height: 10)), with: .color(.green))
+            // labels get a halo (the same text drawn thicker in the map's own background colour first) so they stay
+            // readable where the path runs underneath them
+            let halo = Color(nsColor: .textBackgroundColor)
+            for (dx, dy) in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5), (-1.1, -1.1), (1.1, 1.1), (-1.1, 1.1), (1.1, -1.1)] {
+                ctx.draw(Text("start").font(.system(size: 10, weight: .semibold)).foregroundColor(halo),
+                         at: CGPoint(x: pts[0].x + 9 + dx, y: pts[0].y - 9 + dy), anchor: .bottomLeading)
+            }
             ctx.draw(Text("start").font(.system(size: 10, weight: .semibold)), at: CGPoint(x: pts[0].x + 9, y: pts[0].y - 9), anchor: .bottomLeading)
             if let e = pts.last, pts.count > 1 {
                 ctx.fill(Path(CGRect(x: e.x - 5, y: e.y - 5, width: 10, height: 10)), with: .color(.primary))
+                for (dx, dy) in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5), (-1.1, -1.1), (1.1, 1.1), (-1.1, 1.1), (1.1, -1.1)] {
+                    ctx.draw(Text("end").font(.system(size: 10, weight: .semibold)).foregroundColor(halo),
+                             at: CGPoint(x: e.x + 9 + dx, y: e.y + 9 + dy), anchor: .topLeading)
+                }
                 ctx.draw(Text("end").font(.system(size: 10, weight: .semibold)), at: CGPoint(x: e.x + 9, y: e.y + 9), anchor: .topLeading)
             }
             if let h = highlight, h >= 0, h < pts.count {
                 let p = pts[h]
                 ctx.stroke(Path(ellipseIn: CGRect(x: p.x - 13, y: p.y - 13, width: 26, height: 26)), with: .color(.red), lineWidth: 2.5)
+            }
+            // replay marker: a ring with a dot, riding the recorded positions between two real fixes
+            if let r = replay, let pos = replayPosition(f, fraction: r), pos.index < pts.count {
+                let a = pts[pos.index]
+                let b = pos.index + 1 < pts.count ? pts[pos.index + 1] : a
+                // never draw a marker sliding across a jump: if the two fixes are a jump apart, stay on the first
+                let jump = hypot(b.x - a.x, b.y - a.y) > Double(min(size.width, size.height)) * 0.5
+                let p = jump ? a : CGPoint(x: a.x + (b.x - a.x) * pos.along, y: a.y + (b.y - a.y) * pos.along)
+                ctx.fill(Path(ellipseIn: CGRect(x: p.x - 11, y: p.y - 11, width: 22, height: 22)), with: .color(.white))
+                ctx.stroke(Path(ellipseIn: CGRect(x: p.x - 11, y: p.y - 11, width: 22, height: 22)), with: .color(.accentColor), lineWidth: 3)
+                ctx.fill(Path(ellipseIn: CGRect(x: p.x - 4, y: p.y - 4, width: 8, height: 8)), with: .color(.accentColor))
             }
         }
         .accessibilityLabel("Map of the recorded path with \(analysis.findings.count) flagged point\(analysis.findings.count == 1 ? "" : "s")")
